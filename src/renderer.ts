@@ -5,8 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const XTERM_JS = join(HERE, "..", "node_modules", "@xterm", "xterm", "lib", "xterm.js");
-const XTERM_CSS = join(HERE, "..", "node_modules", "@xterm", "xterm", "lib", "xterm.css");
+const XTERM_JS = join(HERE, "..", "node_modules", "@xterm", "xterm", "lib", "xterm.mjs");
+const XTERM_CSS = join(HERE, "..", "node_modules", "@xterm", "xterm", "css", "xterm.css");
 
 const INDEX_HTML = `<!doctype html>
 <html>
@@ -112,6 +112,8 @@ export class ScreenRenderer {
   async screenshot(command: string, output: string, dest: string): Promise<void> {
     if (!this.page) throw new Error("ScreenRenderer not initialized");
     mkdirSync(resolve(dirname(dest)), { recursive: true });
+    // The index page is an ES module; wait until it has registered renderScreen.
+    await this.page.waitForFunction(() => typeof (globalThis as { renderScreen?: unknown }).renderScreen === "function", { timeout: 10_000 });
     await this.page.evaluate(
       ({ command, output }) => window.renderScreen(command, output),
       { command, output },

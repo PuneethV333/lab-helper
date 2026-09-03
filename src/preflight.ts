@@ -90,10 +90,16 @@ export function checkChromiumInstalled(python3: string): PreflightResult {
     );
     return { ok: true };
   } catch {
-    return {
-      ok: false,
-      message: "Playwright Chromium is not installed. Run: npx playwright install chromium",
-    };
+    // Self-heal: the spec says to install Chromium automatically rather than fail.
+    try {
+      execFileSync("npx", ["playwright", "install", "chromium"], { stdio: "inherit" });
+      return { ok: true };
+    } catch (installErr) {
+      return {
+        ok: false,
+        message: `Playwright Chromium is not installed and auto-install failed: ${(installErr as Error).message}. Run: npx playwright install chromium`,
+      };
+    }
   }
 }
 

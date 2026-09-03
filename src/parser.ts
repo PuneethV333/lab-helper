@@ -17,36 +17,49 @@ export interface ParseResult {
   error?: string;
 }
 
-interface Node {
+interface MdNode {
   type: string;
   depth?: number;
   value?: string;
-  children?: Node[];
-  url?: string;
-  [key: string]: unknown;
+  children?: MdNode[];
 }
 
-function visit(node: Node, cb: (n: Node) => void): void {
-  cb(node);
-  if (node.children) node.children.forEach((c) => visit(c, cb));
+/** Plain text of a node's children, preserving inline emphasis content. */
+function nodeText(node: MdNode): string {
+  return (node.children ?? []).map((c) => String(c.value ?? "") + (c.children ? nodeText(c) : "")).join("");
 }
 
-function nodeText(node: Node): string {
-  return (node.children ?? [])
-    .map((c) => (c.value ? String(c.value) : c.url ?? nodeText(c)))
-    .filter(Boolean)
-    .join("");
+/** Whether a paragraph contains a leading `**Label:**` strong marker. */
+function paragraphLabel(node: MdNode): { label: string; rest: string } | null {
+  const children = node.children;
+  if (!children || children.length === 0) return null;
+  const first = children[0];
+  if (!first || first.type !== "strong") return null;
+  const label = nodeText(first).trim();
+  if (!/^[A-Za-z]+\*?:$/.test(label)) return null;
+  // Rest stops at the next strong marker (e.g. **Command:** on the same line).
+  const stopAt = children.findIndex((c, i) => i > 0 && c.type === "strong");
+  const restChildren = stopAt > 0 ? children.slice(1, stopAt) : children.slice(1);
+  const restText = nodeText({ type: "p", children: restChildren } as MdNode).trim();
+  return { label: label.replace(/:$/, ""), rest: restText };
 }
 
-function fullText(node: Node): string {
-  const parts: string[] = [];
-  const walk = (n: Node): void => {
-    if (n.type === "text" || n.type === "inlineCode") parts.push(String(n.value ?? ""));
-    if (n.type === "code") parts.push(String(n.value ?? ""));
-    n.children?.forEach(walk);
-  };
-  walk(node);
-  return parts.join("");
+function isStepHeading(node: MdNode): { id: number; rawId: string } | null {
+  if (node.type !== "heading" || node.depth !== 2) return null;
+  const text = nodeText(node);
+  const m = /^Step\s+(\d+|[A-Za-z\d]*[A-Za-z][A-Za-z\d]*)/i.exec(text);
+  return m ? { id: extractIdNumber(m[1]), rawId: m[1] } : null;
+}
+
+/** Extract a numeric ordering key from ids like "1", "A1", "3b", "A", "B". */
+function extractIdNumber(raw: string): number {
+  const digits = /[A-Za-z]*(\d+)[A-Za-z]*/.exec(raw);
+  if (digits) return Number(digits[1]);
+  // Letter-only ids (A, B, C, ...) map to 1, 2, 3, ...
+  const upper = raw.toUpperCase();
+  let n = 0;
+  for (const ch of upper) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
 }
 
 /**
@@ -55,9 +68,7 @@ function fullText(node: Node): string {
  */
 export function parseSteps(markdown: string): ParseResult {
   try {
-    const tree = unified().use(remarkParse).parse(markdown);
-    const tokens: Node[] = [];
-    visit(tree as unknown as Node, (t) => tokens.push(t));
+    const tree = unified().use(remarkParse).parse(markdown) as unknown as MdNode & { children: MdNode[] };
     const steps: Step[] = [];
     let current: Partial<Step> | null = null;
 
@@ -65,6 +76,7 @@ export function parseSteps(markdown: string): ParseResult {
       if (current && current.command && current.command.trim() !== "") {
         steps.push({
           id: current.id ?? steps.length,
+          rawId: current.rawId,
           command: current.command.trim(),
           environment: current.environment?.trim() || "bash",
           expected: current.expected?.trim() ?? "",
@@ -73,33 +85,29 @@ export function parseSteps(markdown: string): ParseResult {
       current = null;
     };
 
-    for (const token of tokens) {
-      if (token.type === "heading" && token.depth === 2) {
+    for (const node of tree.children ?? []) {
+      const heading = isStepHeading(node);
+      if (heading) {
         commit();
-        const m = /^Step\s+(\d+)/i.exec(nodeText(token));
-        current = { id: m ? Number(m[1]) : undefined };
+        current = { id: heading.id, rawId: heading.rawId };
         continue;
       }
+      if (!current && node.type !== "heading") continue;
       if (!current) continue;
 
-      if (token.type === "paragraph") {
-        const text = nodeText(token);
-        const envMatch = /^\*\*Environment:\s*\*\*\s*([\w-]+)/i.exec(text);
-        if (envMatch) {
-          current.environment = envMatch[1];
-          continue;
-        }
-        const expMatch = /^\*\*Expected[^:]*:\s*\*\*\s*([\s\S]+)$/i.exec(text);
-        if (expMatch) {
-          current.expected = expMatch[1].trim();
-          continue;
-        }
+      if (node.type === "code" && current.command === undefined) {
+        current.command = String(node.value ?? "");
+        continue;
       }
 
-      if (token.type === "listItem" && current.command === undefined) {
-        const text = fullText(token);
-        const m = /^\*\*Command:\s*\*\*[\s\S]*?\n([\s\S]+)$/is.exec(text);
-        if (m) current.command = m[1].trim();
+      if (node.type === "paragraph") {
+        const labeled = paragraphLabel(node);
+        if (!labeled) continue;
+        if (/^environment/i.test(labeled.label)) {
+          current.environment = labeled.rest.toLowerCase();
+        } else if (/^expected/i.test(labeled.label)) {
+          current.expected = labeled.rest;
+        }
       }
     }
     commit();

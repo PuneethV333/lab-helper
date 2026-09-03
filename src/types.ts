@@ -1,5 +1,7 @@
 export interface Step {
   id: number;
+  /** Original step identifier from the plan (e.g. "1", "A1", "3b"). */
+  rawId?: string;
   command: string;
   environment: string;
   expected: string;

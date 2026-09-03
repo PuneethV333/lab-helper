@@ -32,6 +32,11 @@ function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Write a user's answer to the PTY, submitting it with Enter. */
+function writeAnswer(proc: pty.IPty, value: string): void {
+  proc.write(/\r$|\n$/.test(value) ? value : `${value}\r`);
+}
+
 export class Executor {
   private repl: ReplSession | null = null;
   private readonly idleTimeoutMs: number;
@@ -88,7 +93,7 @@ export class Executor {
         if (prompt.pattern.test(clean) && !answered.has(prompt.pattern.source)) {
           answered.add(prompt.pattern.source);
           const value = await this.onPrompt({ label: prompt.label, secret: prompt.secret });
-          session.proc.write(value);
+          writeAnswer(session.proc, value);
           answeredAny = true;
           break;
         }
@@ -110,14 +115,17 @@ export class Executor {
         return { exitCode: session.exitCode, output: sanitize(session.buffer), done: true };
       }
       const clean = sanitize(session.buffer);
+      // Prompt detection only considers output produced by the current
+      // command — stale prompts in the pre-existing buffer must not re-fire.
+      const newOutput = clean.slice(startLen);
       const grown = clean.length > startLen;
 
       let prompted = false;
       for (const prompt of session.env.prompts) {
-        if (prompt.pattern.test(clean) && !answered.has(prompt.pattern.source)) {
+        if (prompt.pattern.test(newOutput) && !answered.has(prompt.pattern.source)) {
           answered.add(prompt.pattern.source);
           const value = await this.onPrompt({ label: prompt.label, secret: prompt.secret });
-          session.proc.write(value);
+          writeAnswer(session.proc, value);
           prompted = true;
           lastActivity = Date.now();
           break;
@@ -138,7 +146,7 @@ export class Executor {
           label: "This command appears to be waiting for input (idle timeout)",
           secret: false,
         });
-        session.proc.write(value);
+        writeAnswer(session.proc, value);
         lastActivity = Date.now();
       }
       await wait(100);
@@ -147,8 +155,11 @@ export class Executor {
 
   private async runBash(command: string): Promise<CommandResult> {
     return new Promise((resolve) => {
+      // One-shot commands are self-contained per the plan format; no stdin.
+      // (Interactive input is a REPL concern handled via the PTY session.)
       const child = spawn("bash", ["-lc", command], {
         cwd: process.cwd(),
+        stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env as Record<string, string>, TERM: "xterm-256color", FORCE_COLOR: "1" },
       });
       let output = "";
